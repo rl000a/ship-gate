@@ -166,6 +166,8 @@ Org-level recommendation: require the workflow as a status check on `main`.
 - Designing merge gates that stay author-agnostic under AI-assisted throughput  
 - Implementing a small, testable policy engine and wiring it into GitHub Actions end-to-end  
 
-## License
+## Status
 
-MIT
+🔒 **Proprietary product.** Source is private.
+
+This page is the architecture write-up. Full walkthrough available for the right conversation.
