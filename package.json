@@ -1,0 +1,26 @@
+{
+  "name": "ship-gate",
+  "version": "0.1.0",
+  "description": "Diff-aware delivery-policy checks for PRs (secrets, tests-for-src, lockfile), runnable locally and in GitHub Actions.",
+  "type": "module",
+  "bin": {
+    "ship-gate": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "lint": "tsc --noEmit",
+    "check": "tsx src/cli.ts",
+    "ci": "npm run lint && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

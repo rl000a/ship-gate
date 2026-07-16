@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ship:
+    name: Lint · Test · Build · ship-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint (typecheck)
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Dogfood: the product runs on itself inside CI
+      - name: ship-gate (policy checks)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            npx tsx src/cli.ts --base "origin/${{ github.base_ref }}"
+          else
+            npx tsx src/cli.ts --base origin/main || npx tsx src/cli.ts
+          fi

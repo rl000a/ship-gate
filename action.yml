@@ -1,0 +1,51 @@
+name: ship-gate
+description: Same merge gates for humans and agents — secrets, tests, lockfile.
+author: rl000a
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  base:
+    description: Git ref to diff against (default origin/main, then main)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+
+    - name: Install ship-gate
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci
+
+    - name: Resolve base ref
+      id: base
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.base }}" ]; then
+          echo "ref=${{ inputs.base }}" >> "$GITHUB_OUTPUT"
+        elif git rev-parse --verify origin/main >/dev/null 2>&1; then
+          echo "ref=origin/main" >> "$GITHUB_OUTPUT"
+        elif git rev-parse --verify origin/master >/dev/null 2>&1; then
+          echo "ref=origin/master" >> "$GITHUB_OUTPUT"
+        else
+          echo "ref=" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run ship-gate
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        BASE="${{ steps.base.outputs.ref }}"
+        TSX="${{ github.action_path }}/node_modules/.bin/tsx"
+        if [ -n "$BASE" ]; then
+          "$TSX" "${{ github.action_path }}/src/cli.ts" --root "$GITHUB_WORKSPACE" --base "$BASE"
+        else
+          "$TSX" "${{ github.action_path }}/src/cli.ts" --root "$GITHUB_WORKSPACE"
+        fi
