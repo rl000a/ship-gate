@@ -1,148 +1,182 @@
 # ship-gate
 
-Policy checks for pull requests, enforced in CI.
+**The story in one line:** green tests are not the same thing as “safe to merge.”
 
-ship-gate answers a narrow question before merge: *given this diff, is there an obvious reason not to ship?* It does not replace unit tests, code review, or a full secret-scanning platform. It encodes a small set of merge policies so every author — human or agent — hits the same automated bar.
+ship-gate is a small delivery-policy layer that runs in CI. Before a pull request can land, it asks a product question with an engineering answer: *is there an obvious reason this change should not ship?*
 
-## Context
+---
 
-Teams adopting AI-assisted development increase PR volume and change velocity. Existing CI usually proves *the codebase still builds and tests pass*. It rarely proves *this change respects delivery policy*.
+## The story (PM view)
 
-Those are different failure modes:
+### Scene
 
-| Layer | Typical CI | Gap when velocity rises |
-|-------|------------|-------------------------|
-| Correctness | unit / integration tests | covered if tests exist |
-| Buildability | compile, typecheck, install | covered |
-| Delivery policy | often informal | secrets, missing tests for new code, lockfile drift |
+A team ships faster — humans and AI assistants opening more PRs per week. Standups feel good. The board moves. Then something cheap and ugly lands on `main`:
 
-ship-gate sits in the third row. The design assumption is that policy should be:
+- an API key committed “just for local testing”
+- a new module with no test, because “we’ll add coverage next sprint”
+- a dependency bump that breaks installs for everyone else on Monday
 
-1. **Identical for all authors** — no special path for agent-generated PRs  
-2. **Diff-aware** — prefer changed files over whole-repo scans when a base ref exists  
-3. **Fail-closed on high-confidence rules** — clear errors, not soft suggestions  
-4. **Runnable locally** — same CLI as CI, so developers reproduce failures without pushing  
+Nobody intended harm. Review was busy. CI was green. The gap wasn’t competence — it was **missing merge rules**.
 
-## Goals and non-goals
+### The insight
 
-**Goals**
+Most pipelines answer:
 
-- Demonstrate a complete CI path: lint → test → build → policy  
-- Keep policies readable and extensible (one module per check)  
-- Dogfood the product on this repository’s own workflow  
+> Does the product still *work*?
 
-**Non-goals**
+Fewer pipelines answer:
 
-- Compete with Gitleaks, TruffleHog, or Semgrep  
-- Enforce coverage percentages or mutation scores  
-- Own deployment / CD (staging promote, canary, rollback)  
-- Provide org-wide policy-as-code across many languages out of the box  
+> Are we allowed to *accept* this change under our delivery rules?
 
-## Decision: GitHub Actions as the runner
+Those are different jobs.
 
-CI/CD is the practice; GitHub Actions is the execution environment for this repo.
+| Question | Owner feeling | Typical tool |
+|----------|---------------|--------------|
+| Does it still work? | “Quality” | lint, unit tests, build |
+| Are we allowed to merge it? | “Governance / risk” | often a wiki, or nothing |
 
-**Why Actions here**
+ship-gate is the second column, automated.
 
-- Workflow definitions live next to the code they protect (`/.github/workflows`)  
-- PR status checks are the natural merge control surface on GitHub  
-- Composite Action (`action.yml`) lets another repo reuse the same CLI without copying YAML  
+### The product bet
 
-**Why not a custom runner platform**
+**Same bar for every author.**  
+If an agent opened the PR, the rules do not relax. If a senior engineer opened it, the rules do not relax. Velocity is allowed; bypass culture is not.
 
-A from-scratch webhook → queue → worker stack proves orchestration skills, but it does not improve the *policy* story for this scope. For a reference design aimed at GitHub-hosted teams, Actions is the correct default. The policy engine remains a plain Node CLI so it is not locked to Actions forever.
+**Few rules, enforced hard.**  
+Three checks only. Each maps to a real incident class. Noise trains people to ignore CI — so we prefer a short fail over a long warn list.
 
-## Decision: three policies only
+**Explainable failures.**  
+A PM should be able to read the CI log and understand *what* failed and *why it matters to the release*, not only which regex fired.
 
-Each check exists because it maps to a recurring merge incident, not because it looks good on a checklist.
+### What “ready to merge” means here
 
-| Check ID | Rule | Reasoning |
-|----------|------|-----------|
-| `secrets` | Fail if high-signal secret patterns appear in scanned files | Credentials in a merged PR are expensive to remediate; high-signal regex catches common leaks without pretending to be a vault product. Test fixtures are skipped so intentional examples do not false-fail CI. |
-| `tests-for-src` | Fail if `src/` / `lib/` / `app/` source changes without a colocated test | Velocity often adds code without tests. Requiring a sibling `*.test.ts` is a coarse but enforceable proxy for “this change is verified somehow.” Whole-repo mode skips this check; it only applies when `--base` provides a diff. |
-| `lockfile` | Fail if `package.json` changes without a lockfile update, or if no lockfile exists | Reproducible installs are a delivery prerequisite. Drift here breaks CI for everyone else later. |
+A change is merge-ready when:
 
-Adding more checks is intentional extension work: new file under `src/checks/`, register in `src/run.ts`, add tests. Prefer few strict rules over many noisy ones.
+1. The tree still builds and tests pass *(correctness — standard CI)*  
+2. ship-gate finds no policy breach on the diff *(delivery policy — this project)*  
 
-## Pipeline design
+Only then should branch protection allow merge.
+
+```
+Idea → PR → [ build & tests ] → [ ship-gate policies ] → merge
+                              ↑                         ↑
+                         “does it work?”         “may we accept it?”
+```
+
+---
+
+## What it checks (and why a PM should care)
+
+| Check | Plain-language meaning | Failure cost if skipped |
+|-------|------------------------|-------------------------|
+| **secrets** | “Did this PR try to commit credentials?” | Incident, rotation, trust hit |
+| **tests-for-src** | “Did we change product code without adding a test next to it?” | Silent regressions, review theater |
+| **lockfile** | “Did we change dependencies without freezing the install?” | ‘Works on my machine,’ broken CI for others |
+
+These are not a full security program. They are **release hygiene** — the minimum you want before “LGTM.”
+
+---
+
+## Technical design
+
+### Separation of concerns
+
+| Layer | Responsibility | In this repo |
+|-------|----------------|--------------|
+| Correctness CI | lint, test, compile | `npm run lint` · `npm test` · `npm run build` |
+| Delivery policy | merge rules on the diff | `ship-gate` CLI |
+| Runner | when/where jobs execute | GitHub Actions |
+| Enforcement | cannot merge on red | branch protection (repo setting) |
+
+CI/CD is the practice. GitHub Actions is the host. ship-gate is the policy engine. Do not collapse those three in conversation — PMs and engineers mean different things when they say “CI failed.”
+
+### Why a CLI (not only YAML)
+
+Policy lives in TypeScript modules under `src/checks/`. The workflow only invokes them.
+
+**Reasoning:** YAML is a good orchestrator and a bad place to grow business rules. A CLI can run locally (`npm run check`) with the same logic CI uses, so a developer reproduces a red build without pushing. Actions becomes a host, not the product.
+
+### Pipeline (dogfooded on this repo)
 
 ```
 on: pull_request | push(main)
-  → checkout (fetch-depth: 0)
+  → checkout (full history)
   → npm ci
-  → lint (tsc --noEmit)
-  → test
-  → build
+  → lint → test → build
   → ship-gate --base <base-ref>
 ```
 
-**Ordering rationale**
+**Ordering**
 
-1. **Lint/test/build first** — cheap correctness gates; no point evaluating policy on a broken tree  
-2. **Policy last** — treats ship-gate as a merge gate, not a substitute for the test suite  
-3. **`fetch-depth: 0`** — required so `git diff base...HEAD` is accurate on PRs  
+1. Correctness first — no policy evaluation on a broken tree  
+2. Policy last — merge gate, not a substitute for tests  
+3. `fetch-depth: 0` — `git diff base...HEAD` must see real history  
 
-Branch protection (require this workflow) is an operations step in GitHub settings, not something the YAML can fully enforce alone.
+Workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)  
+Reusable wrapper: [`action.yml`](action.yml)
 
-## Architecture
+### Architecture
 
 ```
-src/
-  cli.ts                 # argv, exit codes, human-readable report
-  git.ts                 # changed-file discovery via git diff
-  run.ts                 # check registry + summarize
-  checks/
-    secrets.ts
-    tests-for-src.ts
-    lockfile.ts
-action.yml               # composite Action wrapper around the CLI
-.github/workflows/ci.yml # dogfood pipeline for this repo
+src/cli.ts           entry, reporting, exit codes
+src/git.ts           changed files via git diff
+src/run.ts           check registry + summarize
+src/checks/*.ts      one policy per module
 ```
 
 ```mermaid
 flowchart TD
-  PR[Pull request / push] --> WF[GitHub Actions workflow]
-  WF --> LT[Lint · Test · Build]
-  LT --> CLI[ship-gate CLI]
-  CLI --> DIFF[Changed files from git]
-  DIFF --> C1[secrets]
-  DIFF --> C2[tests-for-src]
-  DIFF --> C3[lockfile]
-  C1 --> SUM[summarize]
-  C2 --> SUM
-  C3 --> SUM
-  SUM -->|all error checks pass| OK[exit 0]
-  SUM -->|any error check fails| NO[exit 1]
+  A[PR opened] --> B[GitHub Actions]
+  B --> C[Lint · Test · Build]
+  C --> D[ship-gate CLI]
+  D --> E[Diff vs base branch]
+  E --> F[secrets]
+  E --> G[tests-for-src]
+  E --> H[lockfile]
+  F --> I{Any error?}
+  G --> I
+  H --> I
+  I -->|no| J[Merge allowed if branch protection requires this check]
+  I -->|yes| K[Merge blocked — log states which policy and why]
 ```
 
-**Local vs PR mode**
+### Policy mechanics (depth)
 
-| Mode | Invocation | Behavior |
-|------|------------|----------|
-| Local | `npm run check` | No base ref; secrets/lockfile scan what they can; tests-for-src skips |
-| PR / CI | `npx tsx src/cli.ts --base origin/main` | Diff-scoped policy evaluation |
+**Diff-scoped when possible**  
+With `--base origin/main`, checks operate on `git diff --name-only base...HEAD`. That keeps signal on *this change*, not the whole history. Without a base (local smoke run), `tests-for-src` skips; secrets/lockfile use a bounded path set.
 
-## Trade-offs and limitations
+**Fail-closed, high confidence**  
+Only `error` severity blocks the build. We deliberately under-claim: regex secrets are not Gitleaks; colocated tests are not coverage %. Enforceable beats aspirational.
 
-- **Regex secret detection** will both miss clever leaks and occasionally false-positive. Acceptable for a reference policy layer; production orgs should add a dedicated scanner beside this, not instead of thinking about policy.  
-- **Colocated-test rule** does not prove test *quality* — only presence. That is deliberate: enforceable beats aspirational.  
-- **Node/npm-centric lockfile check** matches this repo’s stack; other ecosystems need parallel rules.  
-- **Composite Action installs from `action_path`** — consumers depend on this repo’s `package-lock.json`. Pin a tag/SHA when reusing.
+**Author-agnostic**  
+No `if: actor == bot` relaxations. Agent throughput is a load multiplier on the same trust model, not a second trust model.
 
-## Run locally
+Design record: [`docs/DECISIONS.md`](docs/DECISIONS.md)
+
+### Trade-offs (say these out loud)
+
+- Secret patterns will miss clever leaks and can false-positive — pair with a dedicated scanner in production  
+- “Test file exists” ≠ “test is good” — that is intentional scope  
+- Lockfile rule is Node-ecosystem shaped — other stacks need parallel checks  
+- Reusing the Action: pin a commit SHA; do not float on `@main` in serious orgs  
+
+---
+
+## Run it
 
 ```bash
 npm install
-npm run ci                              # lint + test + build
+npm run ci                              # correctness
 npm run check                           # policy, local mode
 npx tsx src/cli.ts --base origin/main   # policy, PR mode
 ```
 
-Exit code `0` = error-severity checks passed. Exit code `1` = at least one failed.
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | error-severity policies passed |
+| `1` | at least one policy failed |
 
-## Reuse in another repository
-
-After this repo is published:
+### Use from another repo
 
 ```yaml
 # .github/workflows/ship-gate.yml
@@ -155,19 +189,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: rl000a/ship-gate@main   # pin to a SHA in real use
+      - uses: rl000a/ship-gate@main   # pin SHA in real use
 ```
 
-Org-level recommendation: require the workflow as a status check on `main`.
+Then require the check on `main` under branch protection. Without that setting, red CI is advisory only.
 
-## What this project is evidence of
+---
 
-- Separating **correctness CI** from **delivery policy**  
-- Designing merge gates that stay author-agnostic under AI-assisted throughput  
-- Implementing a small, testable policy engine and wiring it into GitHub Actions end-to-end  
+## What this demonstrates
 
-## Status
+For a product conversation: *we automated “may we accept this change?” so speed does not invent a second, weaker merge path.*
 
-🔒 **Proprietary product.** Source is private.
-
-This page is the architecture write-up. Full walkthrough available for the right conversation.
+For a technical conversation: *correctness CI and delivery policy are separate layers; policy is a tested CLI; Actions is the host; the pipeline dogfoods itself.*
